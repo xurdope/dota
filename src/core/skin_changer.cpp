@@ -1,15 +1,8 @@
 // ============================================================
 //  InventoryChanger — Per-hero, per-slot item override
-//
-//  Scan flow:
-//    1. Iterate entity list -> find hero entities by m_nHeroID
-//    2. For each hero with active overrides:
-//       a. Read m_hMyWearables CUtlVector
-//       b. Resolve each handle to a wearable entity ptr
-//       c. Patch defIndex / style / wear fallback fields
-//    3. Direct Standalone Wearable Entity Scan (Armory Preview Models)
-//    4. Trigger scene dirty flags for visual update
+//  Overplus-style auto-unlock with crash-safe patching
 // ============================================================
+
 #include "skin_changer.h"
 #include "offset_scanner.h"
 #include "memory_guard.h"
@@ -18,19 +11,16 @@
 #include "../system/system_utils.h"
 #include "../sdk/offsets.h"
 #include "../data/item_schema.h"
+
 #include <windows.h>
-#include <psapi.h>
-#include <cstring>
-#include <algorithm>
 #include <chrono>
-#include <cstdio>
+#include <atomic>
 #include <cstdarg>
+#include <cstring>
 
 // ─────────────────────────────────────────────────────────────
-//  EntitySystem lookup (interface -> pattern fallback)
+//  Helper: VTable validation
 // ─────────────────────────────────────────────────────────────
-using CreateInterfaceFn = void* (*)(const char*, int*);
-
 static bool IsValidVtable(uintptr_t vtbl) {
     if (!SafeMemoryOps::IsValid(vtbl)) return false;
     uintptr_t fn0 = 0;
@@ -38,9 +28,15 @@ static bool IsValidVtable(uintptr_t vtbl) {
     return true;
 }
 
+// ─────────────────────────────────────────────────────────────
+//  Helper: Find EntitySystem via CreateInterface
+// ─────────────────────────────────────────────────────────────
+using CreateInterfaceFn = void* (*)(const char*, int*);
+
 static uintptr_t FindEntitySystemViaInterface() {
     static const char* names[] = {
-        "Source2GameEntities001", "GameEntitySystem_001", "Source2GameEntities_001", "EntitySystem_001"
+        "Source2GameEntities001", "GameEntitySystem_001",
+        "Source2GameEntities_001", "EntitySystem_001"
     };
 
     HMODULE hClient = GetModuleHandleA("client.dll");
@@ -70,106 +66,6 @@ static uintptr_t FindEntitySystemViaInterface() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Default Item Mapping Helper
-// ─────────────────────────────────────────────────────────────
-static const char* GetHeroNameByID(uint32_t heroID) {
-    switch (heroID) {
-        case 14:  return "Pudge";
-        case 8:   return "Juggernaut";
-        case 44:  return "Phantom Assassin";
-        case 1:   return "Anti-Mage";
-        case 11:  return "Shadow Fiend";
-        case 109: return "Terrorblade";
-        case 5:   return "Crystal Maiden";
-        case 21:  return "Windranger";
-        case 39:  return "Queen of Pain";
-        case 67:  return "Spectre";
-        case 74:  return "Invoker";
-        case 41:  return "Faceless Void";
-        case 7:   return "Earthshaker";
-        case 2:   return "Axe";
-        case 49:  return "Dragon Knight";
-        case 25:  return "Lina";
-        case 89:  return "Monkey King";
-        case 84:  return "Ogre Magi";
-        case 18:  return "Sven";
-        case 42:  return "Wraith King";
-        default:  return nullptr;
-    }
-}
-
-static void RegisterDefaultItemMappings(uint32_t heroID, int slot, uint32_t targetDefIndex, uint32_t style, float wear) {
-    auto& sc = SkinChanger::GetInstance();
-    if (targetDefIndex == 0) return;
-
-    const char* hName = GetHeroNameByID(heroID);
-    if (hName != nullptr) {
-        int arcCount = 0, immCount = 0;
-        const ItemEntry* arcanas = GetArcanasDB(arcCount);
-        const ItemEntry* immortals = GetImmortalsDB(immCount);
-
-        for (int i = 0; i < arcCount; ++i) {
-            if (arcanas[i].defIndex != 0 && strcmp(arcanas[i].heroName, hName) == 0) {
-                if (slot < 0 || arcanas[i].slot == slot || arcanas[i].slot == -1) {
-                    sc.AddItemOverride(arcanas[i].defIndex, targetDefIndex, style, wear);
-                }
-            }
-        }
-        for (int i = 0; i < immCount; ++i) {
-            if (immortals[i].defIndex != 0 && strcmp(immortals[i].heroName, hName) == 0) {
-                if (slot < 0 || immortals[i].slot == slot || immortals[i].slot == -1) {
-                    sc.AddItemOverride(immortals[i].defIndex, targetDefIndex, style, wear);
-                }
-            }
-        }
-    }
-
-    if (heroID == 14 && slot == 0) { // Pudge Weapon / Hook
-        static const uint32_t pudgeHookDefs[] = {
-            4001, 125, 4007, 7061, 4052, 4268, 7356, 7357, 9662, 15887,
-            4312, 4568, 4795, 4933, 5252, 6996, 7636, 7637, 7922, 8565
-        };
-        for (uint32_t orig : pudgeHookDefs) sc.AddItemOverride(orig, targetDefIndex, style, wear);
-    }
-    else if (heroID == 8 && slot == 0) { // Juggernaut Weapon
-        static const uint32_t juggDefs[] = { 4035, 69, 10006, 7035, 12083, 4100, 4178, 4202 };
-        for (uint32_t orig : juggDefs) sc.AddItemOverride(orig, targetDefIndex, style, wear);
-    }
-    else if (heroID == 44 && slot == 0) { // PA Weapon
-        static const uint32_t paDefs[] = { 4216, 141, 9355, 15877, 4390, 4520 };
-        for (uint32_t orig : paDefs) sc.AddItemOverride(orig, targetDefIndex, style, wear);
-    }
-    else if (heroID == 1 && slot == 0) { // Anti-Mage Weapon
-        static const uint32_t amDefs[] = { 4008, 1, 9258, 7030, 15890, 4200 };
-        for (uint32_t orig : amDefs) sc.AddItemOverride(orig, targetDefIndex, style, wear);
-    }
-    else if (heroID == 5 && slot == 1) { // Crystal Maiden Head
-        static const uint32_t cmDefs[] = { 4026, 10037, 4150, 4220 };
-        for (uint32_t orig : cmDefs) sc.AddItemOverride(orig, targetDefIndex, style, wear);
-    }
-    else if (heroID == 11 && slot == 0) { // Shadow Fiend Arms
-        static const uint32_t sfDefs[] = { 4061, 10045, 15905, 4300 };
-        for (uint32_t orig : sfDefs) sc.AddItemOverride(orig, targetDefIndex, style, wear);
-    }
-    else if (heroID == 109 && slot == 1) { // Terrorblade Head
-        static const uint32_t tbDefs[] = { 4535, 10023, 7060, 15864 };
-        for (uint32_t orig : tbDefs) sc.AddItemOverride(orig, targetDefIndex, style, wear);
-    }
-    else if (heroID == 21 && slot == 0) { // Windranger Weapon
-        static const uint32_t wrDefs[] = { 4261, 16730, 8014, 15897 };
-        for (uint32_t orig : wrDefs) sc.AddItemOverride(orig, targetDefIndex, style, wear);
-    }
-    else if (heroID == 39 && slot == 0) { // Queen of Pain Weapon
-        static const uint32_t qopDefs[] = { 4211, 16770, 15947 };
-        for (uint32_t orig : qopDefs) sc.AddItemOverride(orig, targetDefIndex, style, wear);
-    }
-    else if (heroID == 67 && slot == 0) { // Spectre Weapon
-        static const uint32_t specDefs[] = { 4241, 16751, 4400 };
-        for (uint32_t orig : specDefs) sc.AddItemOverride(orig, targetDefIndex, style, wear);
-    }
-}
-
-// ─────────────────────────────────────────────────────────────
 //  Singleton
 // ─────────────────────────────────────────────────────────────
 SkinChanger& SkinChanger::GetInstance() {
@@ -177,6 +73,9 @@ SkinChanger& SkinChanger::GetInstance() {
     return inst;
 }
 
+// ─────────────────────────────────────────────────────────────
+//  Initialize — Overplus-style auto-unlock
+// ─────────────────────────────────────────────────────────────
 void SkinChanger::Initialize() {
     std::lock_guard<std::recursive_mutex> lk(m_mutex);
     m_enabled       = true;
@@ -193,10 +92,11 @@ void SkinChanger::Initialize() {
         m_debugLogs.clear();
         m_debugStats = {};
     }
+
     EconHook::Install();
     OffsetScanner::GetInstance().Initialize();
 
-    // Auto-enable Overplus Full Sets for ALL heroes by default on launch
+    // Auto-enable Full Sets for ALL heroes
     int setCnt = 0;
     const FullSetEntry* allSets = GetFullSetsDB(setCnt);
     for (int i = 0; i < setCnt; ++i) {
@@ -206,7 +106,8 @@ void SkinChanger::Initialize() {
         }
     }
 
-    LogDebug("INFO", "[InvChanger] Automatic Skin Unlocker Active! Default cosmetics auto-applied.");
+    LogDebug("INFO", "[InvChanger] Overplus-style Automatic Skin Unlocker Active!");
+    LogDebug("INFO", "[InvChanger] Loaded %d full sets auto-applied.", setCnt);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -245,7 +146,8 @@ bool SkinChanger::ProbeLayout(uintptr_t es, ESLayout& outLayout) {
                             uintptr_t vtbl = 0;
                             if (SafeMemoryOps::Read64(entPtr, vtbl) && IsValidVtable(vtbl)) {
                                 uint32_t handleVal = 0;
-                                if (SafeMemoryOps::Read32(identAddr + 0x08, handleVal) && ((handleVal & 0x7FFF) == (uint32_t)slot)) {
+                                if (SafeMemoryOps::Read32(identAddr + Offsets::m_EntityIdentityHandle, handleVal) &&
+                                    ((handleVal & 0x7FFF) == (uint32_t)slot)) {
                                     validCount += 2;
                                 } else {
                                     validCount += 1;
@@ -274,7 +176,6 @@ bool SkinChanger::ProbeLayout(uintptr_t es, ESLayout& outLayout) {
 bool SkinChanger::TryResolveEntitySystem() {
     ++m_initAttempts;
 
-    // 1. Try CreateInterface
     uintptr_t es = FindEntitySystemViaInterface();
     if (es && SafeMemoryOps::IsValid(es)) {
         if (ProbeLayout(es, m_esLayout)) {
@@ -284,11 +185,10 @@ bool SkinChanger::TryResolveEntitySystem() {
         }
     }
 
-    // 2. Try pattern scanning
     struct Pat { const char* pat; int rel; int sz; };
     static const Pat candidates[] = {
-        { "48 8B 0D ?? ?? ?? ?? 48 85 C9 74 ?? 48 8B 01",       3, 7 },
-        { "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 ?? 48 8B 08",       3, 7 }
+        { "48 8B 0D ?? ?? ?? ?? 48 85 C9 74 ?? 48 8B 01", 3, 7 },
+        { "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 ?? 48 8B 08", 3, 7 }
     };
 
     for (auto& c : candidates) {
@@ -318,56 +218,9 @@ bool SkinChanger::TryResolveEntitySystem() {
     return false;
 }
 
-uintptr_t SkinChanger::ResolveHandle(uintptr_t chunkBase, uint32_t handleVal) {
-    if (handleVal == 0xFFFFFFFF) return 0;
-    const int entIdx      = (int)(handleVal & 0x7FFF);
-    const int chunk       = entIdx / Offsets::kEntitiesPerChunk;
-    const int slotInChunk = entIdx % Offsets::kEntitiesPerChunk;
-
-    uintptr_t chunkPtr = 0;
-    if (!SafeMemoryOps::Read64(chunkBase + (uintptr_t)chunk * 8, chunkPtr) || !SafeMemoryOps::IsValid(chunkPtr))
-        return 0;
-
-    uintptr_t identAddr = chunkPtr + (uintptr_t)slotInChunk * m_esLayout.stride;
-    uintptr_t entityPtr = 0;
-    if (SafeMemoryOps::IsValid(identAddr) && SafeMemoryOps::Read64(identAddr + m_esLayout.ptrOff, entityPtr) && SafeMemoryOps::IsValid(entityPtr))
-        return entityPtr;
-
-    for (uintptr_t altStride : { 0x78, 0x70, 0x80, 0x68 }) {
-        identAddr = chunkPtr + (uintptr_t)slotInChunk * altStride;
-        entityPtr = 0;
-        if (SafeMemoryOps::IsValid(identAddr) && SafeMemoryOps::Read64(identAddr + m_esLayout.ptrOff, entityPtr) && SafeMemoryOps::IsValid(entityPtr))
-            return entityPtr;
-    }
-
-    return 0;
-}
-
-bool SkinChanger::SafeWrite32(uintptr_t addr, uint32_t val) {
-    if (!SafeMemoryOps::IsValid(addr)) return false;
-    if (SafeMemoryOps::Write32(addr, val)) return true;
-    DWORD old = 0;
-    if (!VirtualProtect(reinterpret_cast<void*>(addr), 4, PAGE_EXECUTE_READWRITE, &old)) return false;
-    bool ok = SafeMemoryOps::Write32(addr, val);
-    VirtualProtect(reinterpret_cast<void*>(addr), 4, old, &old);
-    return ok;
-}
-
-bool SkinChanger::SafeWriteFloat(uintptr_t addr, float val) {
-    if (!SafeMemoryOps::IsValid(addr)) return false;
-    return SafeMemoryOps::WriteFloat(addr, val);
-}
-
-bool SkinChanger::SafeWriteBool(uintptr_t addr, bool val) {
-    if (!SafeMemoryOps::IsValid(addr)) return false;
-    return SafeMemoryOps::WriteBool(addr, val);
-}
-
-static void TriggerNativeEngineReload(uintptr_t wearPtr) {
-    (void)wearPtr;
-    // Unsafe dirty flag write removed to prevent crashes on selection
-}
-
+// ─────────────────────────────────────────────────────────────
+//  ApplyPatches — Main patching logic (CRASH-SAFE)
+// ─────────────────────────────────────────────────────────────
 void SkinChanger::ApplyPatches() {
     if (!m_pEntitySystem || !SafeMemoryOps::IsValid(m_pEntitySystem)) return;
 
@@ -423,7 +276,7 @@ void SkinChanger::ApplyPatches() {
     const auto dynOff = OffsetScanner::GetInstance().GetOffsets();
 
     const uintptr_t wearOffCandidates[] = {
-        dynOff.m_hMyWearables, 0xF08, 0xF10, 0xF00, 0xEF8, 0xF18, 0xF20, 0xEE8, 0xE80
+        dynOff.m_hMyWearables, 0xF08, 0xF10, 0xF00, 0xEF8, 0xF18, 0xF20, 0xEE8, 0xE50
     };
     const uintptr_t defOffCandidates[] = {
         (dynOff.m_iItemDefinitionIndex >= 0x1A0 && dynOff.m_iItemDefinitionIndex <= 0x220) ? dynOff.m_iItemDefinitionIndex : 0x1B8,
@@ -436,7 +289,8 @@ void SkinChanger::ApplyPatches() {
         dynOff.m_nHeroID, 0x580, 0x584, 0x588, 0x578, 0x57C, 0x5AC, 0x5B8
     };
 
-    auto PatchWearableAddress = [&](uintptr_t wearPtr, uint32_t targetDefIndex, uint32_t targetStyle, float targetWear) {
+    // ── CRASH-SAFE patch lambda ──
+    auto PatchWearableAddress = [&](uintptr_t wearPtr, uint32_t targetDefIndex, uint32_t targetStyle, float targetWear) -> bool {
         (void)targetWear;
         if (!SafeMemoryOps::IsValid(wearPtr)) return false;
 
@@ -444,19 +298,25 @@ void SkinChanger::ApplyPatches() {
                               ? dynOff.m_iItemDefinitionIndex
                               : 0x1B8;
 
+        uintptr_t writeAddr = wearPtr + targetOff;
+        if (!SafeMemoryOps::IsValid(writeAddr) || !SafeMemoryOps::IsValid(writeAddr + 4)) return false;
+
         uint32_t curDef = 0;
-        if (SafeMemoryOps::Read32(wearPtr + targetOff, curDef) && curDef == targetDefIndex) {
+        if (SafeMemoryOps::Read32(writeAddr, curDef) && curDef == targetDefIndex) {
             return true; // Already patched
         }
 
         bool ok = false;
-        if (SafeWrite32(wearPtr + targetOff, targetDefIndex)) {
+        if (SafeWrite32(writeAddr, targetDefIndex)) {
             if (targetStyle > 0) {
-                SafeWrite32(wearPtr + targetOff + 4, targetStyle);
+                SafeWrite32(writeAddr + 4, targetStyle);
             }
-            // Write fake 64-bit Item ID at targetOff - 8 so Panorama UI recognizes item as OWNED / EQUIPPED ("ВЫБРАНО")
-            const uint64_t fakeItemID = 20000000000ULL + (uint64_t)targetDefIndex;
-            SafeMemoryOps::Write<uint64_t>(wearPtr + targetOff - 8, fakeItemID);
+            // Only write fake ID if address is valid
+            uintptr_t fakeIdAddr = writeAddr - 8;
+            if (SafeMemoryOps::IsValid(fakeIdAddr) && SafeMemoryOps::IsValid(fakeIdAddr + 8)) {
+                const uint64_t fakeItemID = 20000000000ULL + (uint64_t)targetDefIndex;
+                SafeMemoryOps::Write<uint64_t>(fakeIdAddr, fakeItemID);
+            }
             ok = true;
         }
         return ok;
@@ -483,7 +343,7 @@ void SkinChanger::ApplyPatches() {
             uintptr_t vtbl = 0;
             if (!SafeMemoryOps::Read64(entityPtr, vtbl) || !IsValidVtable(vtbl)) continue;
 
-            // ── 1. Hero entity scan (In-Game & Main Menu Hero Preview) ───────
+            // ── 1. Hero entity scan ───────
             uint32_t heroID = 0;
             for (uintptr_t hOff : heroIDOffCandidates) {
                 uint32_t candidateID = 0;
@@ -505,17 +365,24 @@ void SkinChanger::ApplyPatches() {
                         uintptr_t wearVec  = entityPtr + wearOff;
                         uintptr_t wearData = 0;
                         uint32_t  wearCount = 0;
+
+                        if (!SafeMemoryOps::IsValid(wearVec) || !SafeMemoryOps::IsValid(wearVec + 8))
+                            continue;
+
                         if (!SafeMemoryOps::Read64(wearVec + Offsets::kUtlVecDataOff, wearData) ||
-                            !SafeMemoryOps::Read32(wearVec + (uintptr_t)Offsets::kUtlVecSizeOff, wearCount) ||
+                            !SafeMemoryOps::Read32(wearVec + Offsets::kUtlVecSizeOff, wearCount) ||
                             wearCount == 0 || wearCount > 32 || !SafeMemoryOps::IsValid(wearData))
                             continue;
 
                         for (uint32_t wi = 0; wi < wearCount && wi < (uint32_t)INV_MAX_SLOTS; ++wi) {
+                            uintptr_t handleAddr = wearData + wi * 4;
+                            if (!SafeMemoryOps::IsValid(handleAddr)) continue;
+
                             uint32_t handleVal = 0xFFFFFFFF;
-                            if (!SafeMemoryOps::Read32(wearData + wi * 4, handleVal) || handleVal == 0xFFFFFFFF) continue;
+                            if (!SafeMemoryOps::Read32(handleAddr, handleVal) || handleVal == 0xFFFFFFFF) continue;
 
                             uintptr_t wearPtr = ResolveHandle(chunkBase, handleVal);
-                            if (!SafeMemoryOps::IsValid(wearPtr)) continue;
+                            if (!wearPtr || !SafeMemoryOps::IsValid(wearPtr)) continue;
 
                             OffsetScanner::GetInstance().ProbeWearableEntity(wearPtr);
 
@@ -538,7 +405,7 @@ void SkinChanger::ApplyPatches() {
 
                             bool patched = false;
 
-                            // 1. Direct item override rule (itemSnap)
+                            // 1. Direct item override rule
                             auto ruleIt = itemSnap.find(origDef);
                             if (ruleIt != itemSnap.end() && ruleIt->second.enabled && ruleIt->second.overrideDefIndex != 0) {
                                 if (PatchWearableAddress(wearPtr, ruleIt->second.overrideDefIndex, ruleIt->second.style, ruleIt->second.wear)) {
@@ -548,7 +415,7 @@ void SkinChanger::ApplyPatches() {
                                 }
                             }
 
-                            // 2. Per-hero slot override (invSnap)
+                            // 2. Per-hero slot override
                             if (!patched) {
                                 int targetSlot = GetItemSlotFromDB(origDef);
                                 if (targetSlot >= 0 && targetSlot < INV_MAX_SLOTS) {
@@ -563,13 +430,13 @@ void SkinChanger::ApplyPatches() {
                                 }
                             }
 
-                            // 3. Unmapped item fallback: apply active hero slot override
+                            // 3. Unmapped item fallback
                             if (!patched) {
-                                for (int s = 0; s < INV_MAX_SLOTS; ++s) {
-                                    const SlotOverride& ovr = inv.slots[s];
+                                for (int s2 = 0; s2 < INV_MAX_SLOTS; ++s2) {
+                                    const SlotOverride& ovr = inv.slots[s2];
                                     if (ovr.enabled && ovr.defIndex != 0) {
                                         int reqSlot = GetItemSlotFromDB(ovr.defIndex);
-                                        if (reqSlot == s || reqSlot == (int)wi || s == (int)wi || reqSlot == -1) {
+                                        if (reqSlot == s2 || reqSlot == (int)wi || s2 == (int)wi || reqSlot == -1) {
                                             if (PatchWearableAddress(wearPtr, ovr.defIndex, ovr.style, ovr.wear)) {
                                                 ++wearablesPatched;
                                                 dw.patchedDefIndex = ovr.defIndex;
@@ -587,7 +454,7 @@ void SkinChanger::ApplyPatches() {
                 }
             }
 
-            // ── 2. Standalone Wearable Entity Scan (Armory Preview Models) ────────
+            // ── 2. Standalone Wearable Entity Scan ────────
             uintptr_t wearVtbl = 0;
             if (SafeMemoryOps::Read64(entityPtr, wearVtbl) && IsValidVtable(wearVtbl)) {
                 uint32_t candidateDef = 0;
@@ -625,10 +492,10 @@ void SkinChanger::ApplyPatches() {
                         if (validOwnerPtr != 0) {
                             bool patched = false;
                             if (ownerHeroID > 0) {
-                                auto it = invSnap.find(ownerHeroID);
-                                if (it != invSnap.end() && it->second.enabled) {
+                                auto it2 = invSnap.find(ownerHeroID);
+                                if (it2 != invSnap.end() && it2->second.enabled) {
                                     int slot = dbSlot >= 0 ? dbSlot : 0;
-                                    const SlotOverride& ovr = it->second.slots[slot];
+                                    const SlotOverride& ovr = it2->second.slots[slot];
                                     if (ovr.enabled && ovr.defIndex != 0) {
                                         if (PatchWearableAddress(entityPtr, ovr.defIndex, ovr.style, ovr.wear)) {
                                             ++wearablesPatched;
@@ -670,11 +537,14 @@ void SkinChanger::ApplyPatches() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+//  Tick — CRASH-SAFE with lobby delay
+// ─────────────────────────────────────────────────────────────
 void SkinChanger::Tick() {
     if (!m_enabled) return;
 
     static std::atomic<bool> inTick{false};
-    if (inTick.exchange(true)) return; // Prevents concurrent multi-thread execution
+    if (inTick.exchange(true)) return;
 
     struct TickGuard {
         std::atomic<bool>& flag;
@@ -695,11 +565,23 @@ void SkinChanger::Tick() {
         return;
     }
 
+    // ── CRASH FIX: Don't patch during first 5 seconds (lobby loading) ──
     using clk = std::chrono::steady_clock;
-    static auto lastPatch = clk::now();
+    static auto firstTickTime = clk::now();
+    static bool initialized = false;
     auto now = clk::now();
+
+    if (!initialized) {
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - firstTickTime).count() >= 5) {
+            initialized = true;
+        } else {
+            return; // Skip patching for first 5 seconds
+        }
+    }
+
+    static auto lastPatch = clk::now();
     bool doForce = m_needsRescan;
-    if (doForce || std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPatch).count() >= 100) {
+    if (doForce || std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPatch).count() >= 250) {
         lastPatch     = now;
         m_needsRescan = false;
         MemoryGuard::SafeExecute([this]() {
@@ -708,60 +590,63 @@ void SkinChanger::Tick() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+//  Master toggle
+// ─────────────────────────────────────────────────────────────
 void SkinChanger::SetEnabled(bool enabled) {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     m_enabled = enabled;
-    if (enabled) {
-        m_needsRescan = true;
-    }
-    SystemUtils::Log("[InvChanger] State: %s", enabled ? "ON" : "OFF");
+    LogDebug("INFO", "[InvChanger] State: %s", enabled ? "ON" : "OFF");
 }
 
-bool SkinChanger::IsEnabled()           const { return m_enabled; }
-bool SkinChanger::IsEntitySystemReady() const { return m_pEntitySystem != 0 && SafeMemoryOps::IsValid(m_pEntitySystem); }
-int  SkinChanger::GetPatchCount()       const { return m_patchCount; }
-void SkinChanger::ForceRescan()               { m_needsRescan = true; }
+bool SkinChanger::IsEnabled() const {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
+    return m_enabled;
+}
 
+// ─────────────────────────────────────────────────────────────
+//  Override Rule Registration
+// ─────────────────────────────────────────────────────────────
 void SkinChanger::AddItemOverride(uint32_t heroID, int slot, uint32_t defIndex, uint32_t style, float wear, bool enabled) {
-    SetSlotOverride(heroID, slot, defIndex, style, wear, enabled);
-    if (enabled && defIndex != 0) {
-        EconHook::InjectFakeItem(heroID, (uint32_t)(slot >= 0 ? slot : 0), defIndex, style);
-        RegisterDefaultItemMappings(heroID, slot, defIndex, style, wear);
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
+    auto& inv = m_heroInventories[heroID];
+    inv.enabled = true;
+    if (slot >= 0 && slot < INV_MAX_SLOTS) {
+        inv.slots[slot].enabled  = enabled;
+        inv.slots[slot].defIndex = defIndex;
+        inv.slots[slot].style    = style;
+        inv.slots[slot].wear     = wear;
     }
 }
 
 void SkinChanger::AddItemOverride(uint32_t originalDefIndex, uint32_t overrideDefIndex, uint32_t style, float wear) {
-    if (originalDefIndex == 0) return;
     std::lock_guard<std::recursive_mutex> lk(m_mutex);
-    if (overrideDefIndex == 0) {
-        m_itemOverrides.erase(originalDefIndex);
-    } else {
-        ItemOverrideRule rule;
-        rule.originalDefIndex = originalDefIndex;
-        rule.overrideDefIndex = overrideDefIndex;
-        rule.style = style;
-        rule.wear = wear;
-        rule.enabled = true;
-        m_itemOverrides[originalDefIndex] = rule;
-    }
-    m_needsRescan = true;
-    m_enabled = true;
-    LogDebug("INFO", "[InvChanger] Item override #%u -> #%u registered.", originalDefIndex, overrideDefIndex);
+    ItemOverrideRule rule;
+    rule.originalDefIndex = originalDefIndex;
+    rule.overrideDefIndex = overrideDefIndex;
+    rule.style            = style;
+    rule.wear             = wear;
+    rule.enabled          = true;
+    m_itemOverrides[originalDefIndex] = rule;
 }
 
 void SkinChanger::RemoveItemOverride(uint32_t heroID, int slot) {
-    ClearSlotOverride(heroID, slot);
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
+    auto it = m_heroInventories.find(heroID);
+    if (it != m_heroInventories.end() && slot >= 0 && slot < INV_MAX_SLOTS) {
+        it->second.slots[slot] = SlotOverride{};
+    }
 }
 
 void SkinChanger::RemoveItemOverride(uint32_t originalDefIndex) {
     std::lock_guard<std::recursive_mutex> lk(m_mutex);
     m_itemOverrides.erase(originalDefIndex);
-    m_needsRescan = true;
 }
 
 bool SkinChanger::FindItemOverride(uint32_t origDefIndex, ItemOverrideRule& outRule) const {
     std::lock_guard<std::recursive_mutex> lk(m_mutex);
     auto it = m_itemOverrides.find(origDefIndex);
-    if (it != m_itemOverrides.end() && it->second.enabled) {
+    if (it != m_itemOverrides.end()) {
         outRule = it->second;
         return true;
     }
@@ -771,22 +656,31 @@ bool SkinChanger::FindItemOverride(uint32_t origDefIndex, ItemOverrideRule& outR
 int SkinChanger::GetActiveOverridesCount() const {
     std::lock_guard<std::recursive_mutex> lk(m_mutex);
     int count = 0;
-    for (const auto& [hid, inv] : m_heroInventories) {
+    for (auto& [heroID, inv] : m_heroInventories) {
         if (!inv.enabled) continue;
         for (int i = 0; i < INV_MAX_SLOTS; ++i) {
-            if (inv.slots[i].enabled && inv.slots[i].defIndex != 0) {
-                count++;
-            }
+            if (inv.slots[i].enabled && inv.slots[i].defIndex != 0) count++;
         }
     }
-    for (const auto& [origDef, rule] : m_itemOverrides) {
-        if (rule.enabled && rule.overrideDefIndex != 0) {
-            count++;
-        }
+    for (auto& [defIdx, rule] : m_itemOverrides) {
+        if (rule.enabled && rule.overrideDefIndex != 0) count++;
     }
     return count;
 }
 
+int SkinChanger::GetPatchCount() const {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
+    return m_patchCount;
+}
+
+bool SkinChanger::IsEntitySystemReady() const {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
+    return m_pEntitySystem != 0 && m_esLayout.resolved;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Per-hero inventory configuration
+// ─────────────────────────────────────────────────────────────
 HeroInventory SkinChanger::GetHeroInventoryCopy(uint32_t heroID) const {
     std::lock_guard<std::recursive_mutex> lk(m_mutex);
     auto it = m_heroInventories.find(heroID);
@@ -797,10 +691,10 @@ HeroInventory SkinChanger::GetHeroInventoryCopy(uint32_t heroID) const {
 bool SkinChanger::HeroHasOverrides(uint32_t heroID) const {
     std::lock_guard<std::recursive_mutex> lk(m_mutex);
     auto it = m_heroInventories.find(heroID);
-    if (it == m_heroInventories.end()) return false;
-    if (!it->second.enabled) return false;
-    for (int i = 0; i < INV_MAX_SLOTS; ++i)
+    if (it == m_heroInventories.end() || !it->second.enabled) return false;
+    for (int i = 0; i < INV_MAX_SLOTS; ++i) {
         if (it->second.slots[i].enabled && it->second.slots[i].defIndex != 0) return true;
+    }
     return false;
 }
 
@@ -810,28 +704,14 @@ void SkinChanger::SetHeroEnabled(uint32_t heroID, bool enabled) {
     m_needsRescan = true;
 }
 
-void SkinChanger::SetSlotOverride(uint32_t heroID, int slot,
-                                  uint32_t defIndex, uint32_t style, float wear, bool enabled) {
-    if (slot < 0 || slot >= INV_MAX_SLOTS) return;
-    std::lock_guard<std::recursive_mutex> lk(m_mutex);
-    auto& inv = m_heroInventories[heroID];
-    inv.slots[slot].defIndex = defIndex;
-    inv.slots[slot].style    = style;
-    inv.slots[slot].wear     = wear;
-    inv.slots[slot].enabled  = enabled && (defIndex != 0);
-    inv.enabled = true;
+void SkinChanger::SetSlotOverride(uint32_t heroID, int slot, uint32_t defIndex, uint32_t style, float wear, bool enabled) {
+    AddItemOverride(heroID, slot, defIndex, style, wear, enabled);
     m_needsRescan = true;
-    m_enabled = true;
 }
 
 void SkinChanger::ClearSlotOverride(uint32_t heroID, int slot) {
-    if (slot < 0 || slot >= INV_MAX_SLOTS) return;
-    std::lock_guard<std::recursive_mutex> lk(m_mutex);
-    auto it = m_heroInventories.find(heroID);
-    if (it != m_heroInventories.end()) {
-        it->second.slots[slot] = SlotOverride{};
-        m_needsRescan = true;
-    }
+    RemoveItemOverride(heroID, slot);
+    m_needsRescan = true;
 }
 
 void SkinChanger::ClearHeroOverrides(uint32_t heroID) {
@@ -847,49 +727,102 @@ void SkinChanger::ClearAllOverrides() {
     m_needsRescan = true;
 }
 
+// ─────────────────────────────────────────────────────────────
+//  UI helpers
+// ─────────────────────────────────────────────────────────────
+void SkinChanger::ForceRescan() {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
+    m_needsRescan = true;
+}
+
 std::vector<DetectedWearable> SkinChanger::GetDetectedWearables() const {
     std::lock_guard<std::recursive_mutex> lk(m_mutex);
     return m_detectedWearables;
 }
 
+// ─────────────────────────────────────────────────────────────
+//  Debug logging
+// ─────────────────────────────────────────────────────────────
 void SkinChanger::LogDebug(const char* level, const char* fmt, ...) {
     char buf[512];
-    va_list args; va_start(args, fmt); vsnprintf(buf, sizeof(buf), fmt, args); va_end(args);
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
 
-    auto now  = std::chrono::system_clock::now();
-    auto tmt  = std::chrono::system_clock::to_time_t(now);
-    struct tm tmb; localtime_s(&tmb, &tmt);
-    char ts[16]; snprintf(ts, sizeof(ts), "%02d:%02d:%02d", tmb.tm_hour, tmb.tm_min, tmb.tm_sec);
+    std::lock_guard<std::mutex> dl(m_debugMutex);
 
-    ImVec4 col = ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
-    if      (!strcmp(level, "SUCCESS")) col = ImVec4(0.29f, 0.87f, 0.50f, 1.0f);
-    else if (!strcmp(level, "ERROR"))   col = ImVec4(0.97f, 0.44f, 0.44f, 1.0f);
-    else if (!strcmp(level, "WARN"))    col = ImVec4(0.98f, 0.75f, 0.14f, 1.0f);
-    else if (!strcmp(level, "INFO"))    col = ImVec4(0.22f, 0.74f, 0.97f, 1.0f);
+    SkinDebugLogEntry entry;
+    entry.message = buf;
 
-    {
-        std::lock_guard<std::mutex> dl(m_debugMutex);
-        m_debugLogs.push_back({ ts, buf, col });
-        if (m_debugLogs.size() > 200) m_debugLogs.pop_front();
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char ts[32];
+    snprintf(ts, sizeof(ts), "%02d:%02d:%02d", st.wHour, st.wMinute, st.wSecond);
+    entry.timestamp = ts;
+
+    if (strcmp(level, "SUCCESS") == 0) {
+        entry.color = ImVec4(0.3f, 1.0f, 0.3f, 1.0f);
+    } else if (strcmp(level, "ERROR") == 0) {
+        entry.color = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+    } else if (strcmp(level, "WARN") == 0) {
+        entry.color = ImVec4(1.0f, 1.0f, 0.3f, 1.0f);
+    } else {
+        entry.color = ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
     }
+
+    m_debugLogs.push_back(entry);
+    if (m_debugLogs.size() > 200) m_debugLogs.pop_front();
+
     SystemUtils::Log("%s", buf);
 }
 
 void SkinChanger::ClearDebugLogs() {
     std::lock_guard<std::mutex> dl(m_debugMutex);
     m_debugLogs.clear();
+    m_debugStats = {};
 }
 
 std::vector<SkinDebugLogEntry> SkinChanger::GetDebugLogs() const {
     std::lock_guard<std::mutex> dl(m_debugMutex);
-    return { m_debugLogs.begin(), m_debugLogs.end() };
+    return std::vector<SkinDebugLogEntry>(m_debugLogs.begin(), m_debugLogs.end());
 }
 
 SkinDebugStats SkinChanger::GetDebugStats() const {
     std::lock_guard<std::mutex> dl(m_debugMutex);
-    SkinDebugStats s = m_debugStats;
-    s.entitySystemAddr    = m_pEntitySystem;
-    s.isEntitySystemReady = IsEntitySystemReady();
-    s.activeOverridesCount = GetActiveOverridesCount();
-    return s;
+    return m_debugStats;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Memory operations
+// ─────────────────────────────────────────────────────────────
+uintptr_t SkinChanger::ResolveHandle(uintptr_t chunkBase, uint32_t handleVal) {
+    const int entIdx = (int)(handleVal & 0x7FFF);
+    const int chunk  = entIdx / Offsets::kEntitiesPerChunk;
+    const int slotInChunk = entIdx % Offsets::kEntitiesPerChunk;
+
+    if (chunk < 0 || chunk >= (Offsets::kMaxEntities / Offsets::kEntitiesPerChunk)) return 0;
+
+    uintptr_t chunkPtr = 0;
+    if (!SafeMemoryOps::Read64(chunkBase + (uintptr_t)chunk * 8, chunkPtr) || !SafeMemoryOps::IsValid(chunkPtr))
+        return 0;
+
+    uintptr_t identAddr = chunkPtr + (uintptr_t)slotInChunk * m_esLayout.stride;
+    uintptr_t entPtr = 0;
+    if (!SafeMemoryOps::IsValid(identAddr) || !SafeMemoryOps::Read64(identAddr + m_esLayout.ptrOff, entPtr) || !SafeMemoryOps::IsValid(entPtr))
+        return 0;
+
+    return entPtr;
+}
+
+bool SkinChanger::SafeWrite32(uintptr_t addr, uint32_t val) {
+    return SafeMemoryOps::Write<uint32_t>(addr, val);
+}
+
+bool SkinChanger::SafeWriteFloat(uintptr_t addr, float val) {
+    return SafeMemoryOps::Write<float>(addr, val);
+}
+
+bool SkinChanger::SafeWriteBool(uintptr_t addr, bool val) {
+    return SafeMemoryOps::Write<bool>(addr, val);
 }
