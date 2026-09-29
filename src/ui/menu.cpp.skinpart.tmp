@@ -1,0 +1,233 @@
+
+    // =======================================================================
+    //   ВКЛАДКА: СКИНЧЕНДЖЕР — просто ON/OFF
+    //   Скины подбираются автоматически по встроенной таблице правил.
+    // =======================================================================
+
+    void TabSkinChanger()
+    {
+        auto& sc  = SkinChanger::GetInstance();
+        const bool en    = sc.IsEnabled();
+        const bool ready = sc.IsEntitySystemReady();
+        const float cw   = ColumnWidth();
+        const float t    = Now();
+
+        ImGui::BeginGroup();
+
+        // ── БОЛЬШАЯ КНОПКА ВКЛ/ВЫКЛ ──────────────────────────────────
+        {
+            ImDrawList* dl    = ImGui::GetWindowDrawList();
+            const float btnH  = px(90);
+            const float btnW  = ImGui::GetContentRegionAvail().x;
+            const ImVec2 bMin = ImGui::GetCursorScreenPos();
+
+            const float pulseAnim = Animate(ImGui::GetID("pw_pulse"), en ? 1.0f : 0.0f, 6.0f);
+            const float pulse = 0.5f + 0.5f * sinf(t * 3.0f);
+
+            ImGui::InvisibleButton("##power_btn", ImVec2(btnW, btnH));
+            const bool hov = ImGui::IsItemHovered();
+            if (ImGui::IsItemClicked()) {
+                sc.SetEnabled(!en);
+                Toast(!en ? "Скинченджер ВКЛЮЧЁН — авто-патч каждые 500мс" : "Скинченджер ВЫКЛЮЧЕН");
+            }
+            const float hAnim = Animate(ImGui::GetID("pw_hov"), hov ? 1.0f : 0.0f, 10.0f);
+            const ImVec2 bMax = bMin + ImVec2(btnW, btnH);
+
+            const float r = px(14);
+            if (pulseAnim > 0.01f) {
+                for (int i = 10; i > 0; --i)
+                    dl->AddRectFilled(bMin - ImVec2(px(i)*1.2f, px(i)*0.6f),
+                                      bMax + ImVec2(px(i)*1.2f, px(i)*0.6f),
+                                      Col(WithA(S.accent, 0.025f * pulseAnim * (float)i / 10.0f)),
+                                      r + px(i)*1.2f);
+            }
+            GradientRect(dl, bMin, bMax,
+                en ? WithA(S.accent,    0.28f + 0.10f * pulseAnim) : WithA(T.frame,     0.85f + 0.12f * hAnim),
+                en ? WithA(S.accent2,   0.18f + 0.08f * pulseAnim) : WithA(T.frame_hov, 0.5f  * hAnim),
+                r);
+            dl->AddRect(bMin, bMax,
+                Col(en ? WithA(S.accent, 0.7f + 0.3f * pulse * pulseAnim)
+                       : WithA(T.border, 0.4f + 0.4f * hAnim)),
+                r, 0, px(1.5f));
+
+            const ImVec2 ic = ImVec2(bMin.x + px(40), bMin.y + btnH * 0.5f);
+            const float  ir = px(15);
+            const ImU32 icCol = Col(en ? Lighten(S.accent, 0.5f) : ImLerp(T.text_mute, T.text, hAnim));
+            dl->PathArcTo(ic, ir, IM_PI * 0.75f, IM_PI * 2.25f, 32);
+            dl->PathStroke(icCol, ImDrawFlags_None, px(2.5f));
+            dl->AddLine(ic - ImVec2(0, ir*0.35f), ic - ImVec2(0, ir*1.05f), icCol, px(2.5f));
+            if (pulseAnim > 0.1f)
+                dl->AddCircleFilled(ic, px(4), Col(WithA(S.accent, 0.5f * pulseAnim * pulse)));
+
+            const char* mainLbl = en ? "СКИНЧЕНДЖЕР АКТИВЕН" : "СКИНЧЕНДЖЕР ВЫКЛЮЧЕН";
+            const char* subLbl  = en ? "Авто-патч каждые 500мс" : "Нажмите для включения";
+            ImFont* bf = BoldFont();
+            const float fs = px(18);
+            const ImVec2 ls = bf->CalcTextSizeA(fs, FLT_MAX, 0.0f, mainLbl);
+            const float tx = ic.x + ir * 1.8f;
+            const float ty = bMin.y + (btnH - ls.y - px(16)) * 0.5f;
+
+            if (en) {
+                GradientText(dl, bf, fs, ImVec2(tx, ty), mainLbl,
+                    Lighten(S.accent, 0.4f), Lighten(S.accent2, 0.3f), px(2), t * 1.4f);
+            } else {
+                dl->AddText(bf, fs, ImVec2(tx, ty), Col(ImLerp(T.text_dim, T.text, hAnim)), mainLbl);
+            }
+            dl->AddText(ImGui::GetFont(), px(13), ImVec2(tx, ty + ls.y + px(4)),
+                Col(en ? WithA(T.text_mute, 0.8f) : ImLerp(T.text_mute, T.text_dim, hAnim)), subLbl);
+        }
+
+        ImGui::Dummy(ImVec2(0, px(10)));
+
+        // ── СТАТУС ────────────────────────────────────────────────────
+        BeginCard("Status", cw);
+        {
+            ImDrawList* dl    = ImGui::GetWindowDrawList();
+            const float lh    = ImGui::GetTextLineHeight();
+            const ImVec4 cOK  = Hex(0x4ADE80);
+            const ImVec4 cERR = Hex(0xF87171);
+            const ImVec4 cWRN = Hex(0xFBBF24);
+            const ImVec4 cCYN = Hex(0x38BDF8);
+
+            auto StatusRow = [&](const char* label, bool ok, const char* valOk, const char* valErr, ImVec4 col) {
+                const ImVec2 p   = ImGui::GetCursorScreenPos();
+                const ImVec2 dot = p + ImVec2(px(7), lh * 0.5f);
+                const float  pls = 0.5f + 0.5f * sinf(t * 3.0f);
+                if (ok) dl->AddCircleFilled(dot, px(4) + px(2)*pls, Col(WithA(col, 0.3f*pls)), 12);
+                dl->AddCircleFilled(dot, px(4), Col(ok ? col : cERR), 10);
+                ImGui::SetCursorScreenPos(p + ImVec2(px(18), 0));
+                ImGui::TextColored(T.text_dim, "%s", label);
+                ImGui::SameLine();
+                ImGui::TextColored(ok ? col : cERR, "%s", ok ? valOk : valErr);
+            };
+
+            StatusRow("EntitySystem:", ready, "FOUND",    "NOT FOUND", cOK);
+            StatusRow("SkinChanger:", en,     "ACTIVE",   "DISABLED",  en ? cOK : cWRN);
+
+            const auto stats = sc.GetDebugStats();
+            ImGui::Separator();
+            ImGui::PushFont(nullptr, 13.0f);
+            ImGui::TextColored(cCYN,     "Scan #%u", stats.tickCount);
+            ImGui::SameLine(); ImGui::TextColored(T.text_mute, "|");
+            ImGui::SameLine(); ImGui::TextColored(T.text_dim,  "Entities: %u",  stats.totalEntitiesScanned);
+            ImGui::SameLine(); ImGui::TextColored(T.text_mute, "|");
+            ImGui::SameLine(); ImGui::TextColored(T.text_dim,  "Wearables: %u", stats.econItemsFound);
+            ImGui::SameLine(); ImGui::TextColored(T.text_mute, "|");
+            ImGui::SameLine(); ImGui::TextColored(
+                stats.itemsPatched > 0 ? cOK : T.text_mute,
+                "Patched: %u", stats.itemsPatched);
+            ImGui::PopFont();
+
+            ImGui::Dummy(ImVec2(0, px(6)));
+            const float bwx = (ImGui::GetContentRegionAvail().x - px(8)) * 0.5f;
+            if (Button("Force Rescan", ImVec2(bwx, 0))) {
+                sc.ForceRescan();
+                Toast("Force rescan requested!");
+            }
+            ImGui::SameLine(0, px(8));
+            if (Button("Log ->", ImVec2(bwx, 0), false)) S.tab = 2;
+        }
+        EndCard();
+
+        BeginCard("How it works", cw);
+        {
+            ImGui::PushFont(nullptr, 13.0f);
+            ImGui::TextColored(T.text_mute,
+                "Every 500ms the changer scans\n"
+                "all wearable entities in memory.\n\n"
+                "If a defIndex matches the built-in\n"
+                "rule table, it is replaced with\n"
+                "the arcana/immortal version.\n\n"
+                "No setup needed.\n"
+                "Just press the button above.");
+            ImGui::PopFont();
+        }
+        EndCard();
+
+        NextColumn();
+        BeginCard("Detected wearables", -1.0f);
+        {
+            auto wearables = sc.GetDetectedWearables();
+
+            if (!ready) {
+                ImGui::PushFont(nullptr, 13.5f);
+                ImGui::TextColored(Hex(0xFBBF24),
+                    "EntitySystem not found.\n\n"
+                    "Enter a game/lobby, then\n"
+                    "enable the changer.");
+                ImGui::PopFont();
+            } else if (!en) {
+                ImGui::PushFont(nullptr, 13.5f);
+                ImGui::TextColored(T.text_mute,
+                    "Enable the skin changer\n"
+                    "with the button on the left.\n\n"
+                    "Detected wearables will\n"
+                    "appear here.");
+                ImGui::PopFont();
+            } else if (wearables.empty()) {
+                ImGui::PushFont(nullptr, 13.5f);
+                ImGui::TextColored(T.text_mute,
+                    "No wearables detected.\n\n"
+                    "Enter a game/lobby and\n"
+                    "press Force Rescan.");
+                ImGui::PopFont();
+            } else {
+                ImGui::PushFont(nullptr, 12.5f);
+                ImGui::TextColored(T.text_mute, "Found: %d wearables", (int)wearables.size());
+                ImGui::PopFont();
+                ImGui::Dummy(ImVec2(0, px(4)));
+
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
+                ImGui::BeginChild("##wearlist", ImVec2(-1, -px(4)), ImGuiChildFlags_None);
+
+                const float rh = px(44);
+                for (int i = 0; i < (int)wearables.size(); ++i) {
+                    const auto& w = wearables[i];
+                    ImGui::PushID(i);
+                    const ImVec2 p  = ImGui::GetCursorScreenPos();
+                    const float  aw = ImGui::GetContentRegionAvail().x;
+                    ImGui::InvisibleButton("##wr", ImVec2(aw, rh));
+                    const float hAm = Animate(ImGui::GetID("hv"), ImGui::IsItemHovered() ? 1.0f : 0.0f);
+                    const bool  patched = (w.patchedDefIndex > 0 && w.patchedDefIndex != w.currentDefIndex);
+
+                    ImDrawList* dl  = ImGui::GetWindowDrawList();
+                    const ImRect bb(p, p + ImVec2(aw, rh));
+                    if (hAm > 0.0f)
+                        dl->AddRectFilled(bb.Min, bb.Max, Col(WithA(S.accent, 0.07f*hAm)), px(6));
+                    if (patched)
+                        dl->AddRect(bb.Min, bb.Max, Col(WithA(Hex(0x4ADE80), 0.4f)), px(6), 0, px(1.2f));
+
+                    char addrBuf[20]; snprintf(addrBuf, sizeof(addrBuf), "0x%llX", (unsigned long long)w.addr);
+                    dl->AddText(ImGui::GetFont(), px(11), ImVec2(p.x+px(8), p.y+px(4)), Col(T.text_mute), addrBuf);
+
+                    char idxBuf[64];
+                    if (patched)
+                        snprintf(idxBuf, sizeof(idxBuf), "#%-6u  ->  #%u", w.currentDefIndex, w.patchedDefIndex);
+                    else
+                        snprintf(idxBuf, sizeof(idxBuf), "#%-6u  (no rule)", w.currentDefIndex);
+
+                    dl->AddText(BoldFont(), px(14), ImVec2(p.x+px(8), p.y+px(22)),
+                        Col(patched ? Hex(0x4ADE80) : T.text_dim), idxBuf);
+
+                    if (patched) {
+                        const char* badge = "PATCHED";
+                        const float bfs = px(11);
+                        const ImVec2 bs = ImGui::CalcTextSize(badge) * (bfs / ImGui::GetFontSize());
+                        const ImVec2 bp(bb.Max.x - bs.x - px(14), p.y + (rh - bs.y)*0.5f);
+                        dl->AddRectFilled(bp - ImVec2(px(4),px(2)), bp + bs + ImVec2(px(4),px(2)),
+                            Col(WithA(Hex(0x4ADE80), 0.18f)), px(4));
+                        dl->AddText(ImGui::GetFont(), bfs, bp, Col(Hex(0x4ADE80)), badge);
+                    }
+
+                    ImGui::PopID();
+                }
+
+                ImGui::EndChild();
+                ImGui::PopStyleColor();
+            }
+        }
+        EndCard();
+
+        ImGui::EndGroup();
+    }
+

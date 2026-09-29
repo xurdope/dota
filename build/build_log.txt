@@ -1,0 +1,54 @@
+Microsoft (R) C/C++ Optimizing Compiler Version 19.51.36260 for x64
+(C) Корпорация Майкрософт (Microsoft Corporation).  Все права защищены.
+
+DllMain.cpp
+system_utils.cpp
+memory_guard.cpp
+state_manager.cpp
+pattern_scan.cpp
+skin_changer.cpp
+offset_scanner.cpp
+econ_hook.cpp
+visuals.cpp
+present_hook.cpp
+dx11_renderer.cpp
+ui_manager.cpp
+menu.cpp
+imgui.cpp
+imgui_draw.cpp
+imgui_tables.cpp
+imgui_widgets.cpp
+imgui_impl_win32.cpp
+imgui_impl_dx11.cpp
+Создание кода...
+Microsoft (R) Incremental Linker Version 14.51.36260.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/dll 
+/implib:bin\Spectre_mod.lib 
+/out:bin\Spectre_mod.dll 
+user32.lib 
+gdi32.lib 
+kernel32.lib 
+winmm.lib 
+d3d11.lib 
+dxgi.lib 
+build\DllMain.obj 
+build\system_utils.obj 
+build\memory_guard.obj 
+build\state_manager.obj 
+build\pattern_scan.obj 
+build\skin_changer.obj 
+build\offset_scanner.obj 
+build\econ_hook.obj 
+build\visuals.obj 
+build\present_hook.obj 
+build\dx11_renderer.obj 
+build\ui_manager.obj 
+build\menu.obj 
+build\imgui.obj 
+build\imgui_draw.obj 
+build\imgui_tables.obj 
+build\imgui_widgets.obj 
+build\imgui_impl_win32.obj 
+build\imgui_impl_dx11.obj 
